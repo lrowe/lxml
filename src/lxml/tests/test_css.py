@@ -1,7 +1,9 @@
 import unittest, sys
 from lxml.tests.common_imports import doctest, make_doctest, HelperTestCase
+from lxml import etree
 from lxml import html
 from lxml import cssselect
+from xml.sax.saxutils import quoteattr
 import os
 
 doc_fn = os.path.join(os.path.dirname(__file__),
@@ -12,16 +14,16 @@ try:
 except (NameError, KeyError):
     basestring = (str, bytes)
 
-namespaces = {'re': cssselect.regex_namespace}
+namespaces = {'re': cssselect.regex_namespace, 'sets': 'http://exslt.org/sets'}
 
 # Data borrowed from http://mootools.net/slickspeed/
 
 class CSSTestCase(HelperTestCase):
     
     selectors = [
-        ## Changed from original; probably because I'm only searching the body
+        ## Changed from original; javascript document.all.length is 249
         #('*', 252),
-        ('*', 246),
+        ('*', 249),
         ('div:only-child', 22), # ?
         ## Changed from original, because the original doesn't make sense.
         ## There really aren't that many occurrances of 'celia'
@@ -72,6 +74,8 @@ class CSSTestCase(HelperTestCase):
         ('div[class~=dialog]', 51), # ? Seems right
         ]
 
+    options = dict(regex_prefix='re')
+
     def __init__(self, index):
         self.index = index
         super(HelperTestCase, self).__init__()
@@ -86,13 +90,11 @@ class CSSTestCase(HelperTestCase):
         c = f.read()
         f.close()
         doc = html.document_fromstring(c)
-        body = doc.xpath('//body')[0]
         bad = []
         selector, count = self.selectors[self.index]
-        options = dict(regex_prefix='re')
-        xpath = cssselect.css_to_xpath(cssselect.parse(selector, options), **options)
+        xpath = cssselect.css_to_xpath(cssselect.parse(selector, self.options), **self.options)
         try:
-            results = body.xpath(xpath, namespaces=namespaces)
+            results = doc.xpath(xpath, namespaces=namespaces)
         except Exception:
             e = sys.exc_info()[1]
             e.args = ("%s for xpath %r" % (e, xpath),)
@@ -108,14 +110,38 @@ class CSSTestCase(HelperTestCase):
                 "Got string result (%r), not element, for xpath %r"
                 % (results[:20], str(xpath)))
         if len(results) != count:
-            #if self.shortDescription() == 'div.character, div.dialog':
+            #if selector == 'div.character, div.dialog':
             #    import pdb; pdb.set_trace()
             assert 0, (
                 "Did not get expected results (%s) instead %s for xpath %r"
                 % (count, len(results), str(xpath)))
 
     def shortDescription(self):
-        return self.selectors[self.index][0]
+        return '%s: %s' % (self.__class__.__name__, self.selectors[self.index][0])
+
+class MatchPatternTestCase(CSSTestCase):
+    options = dict(regex_prefix='re', match_pattern=True)
+
+    template = '''
+        <xsl:stylesheet version="1.0"
+            xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+            xmlns:exslt_org_regular_expressions="http://exslt.org/regular-expressions"
+            >
+            <xsl:template match=%s />
+        </xsl:stylesheet>
+        '''
+
+    def runTest(self):
+        super(MatchPatternTestCase, self).runTest()
+        selector, count = self.selectors[self.index]
+        xpath = cssselect.css_to_xpath(cssselect.parse(selector, self.options), **self.options)
+        try:
+            etree.XSLT(etree.XML(self.template % quoteattr(xpath)))
+        except Exception:
+            e = sys.exc_info()[1]
+            e.args = ("%s for xpath %r" % (e, xpath),)
+            raise
+
 
 def unique(s):
     found = {}
@@ -134,4 +160,5 @@ def test_suite():
     suite.addTests([make_doctest('test_css.txt')])
     suite.addTests(doctest.DocTestSuite(cssselect))
     suite.addTests(list(CSSTestCase.all()))
+    suite.addTests(list(MatchPatternTestCase.all()))
     return suite
