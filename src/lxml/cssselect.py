@@ -37,6 +37,7 @@ See the `CSSSelector` class for details.
 
 import re
 from lxml import etree
+from xml.sax.saxutils import quoteattr
 
 __all__ = ['SelectorSyntaxError', 'ExpressionError',
            'CSSSelector']
@@ -466,7 +467,7 @@ class Element(object):
         else:
             # FIXME: Should we lowercase here?
             el = '%s:%s' % (self.namespace, self.element)
-        return XPathExpr(element=el)
+        return XPathExpr(element=el, options=self.options)
 
 class Hash(object):
     """
@@ -501,7 +502,7 @@ class Or(object):
 
     def xpath(self):
         paths = [item.xpath() for item in self.items]
-        return XPathExprOr(paths)
+        return XPathExprOr(paths, options=self.options)
 
 class CombinedSelector(object):
 
@@ -541,7 +542,13 @@ class CombinedSelector(object):
 
     def _xpath_descendant(self, xpath, sub):
         # when sub is a descendant in any way of xpath
-        xpath.join('/descendant-or-self::*/', sub.xpath())
+        if self.options.get('match_pattern'):
+            # xsl:template match patterns must not use descendant-or-self axis
+            combiner = '//'
+        else:
+            # '/descendant-or-self::*/' is faster than '//'
+            combiner = '/descendant-or-self::*/'
+        xpath.join(combiner, sub.xpath())
         return xpath
     
     def _xpath_child(self, xpath, sub):
@@ -568,7 +575,12 @@ _el_re = re.compile(r'^\w+\s*$', re.UNICODE)
 _id_re = re.compile(r'^(\w*)#(\w+)\s*$', re.UNICODE)
 _class_re = re.compile(r'^(\w*)\.(\w+)\s*$', re.UNICODE)
 
-def css_to_xpath(css_expr, prefix='descendant-or-self::', regex_prefix=default_regex_prefix):
+def css_to_xpath(css_expr, prefix=None, regex_prefix=default_regex_prefix, match_pattern=False):
+    if prefix is None:
+        if match_pattern:
+            prefix = '//'
+        else:
+            prefix = 'descendant-or-self::'
     if isinstance(css_expr, _basestring):
         match = _el_re.search(css_expr)
         if match is not None:
@@ -581,7 +593,7 @@ def css_to_xpath(css_expr, prefix='descendant-or-self::', regex_prefix=default_r
         if match is not None:
             return "%s%s[contains(concat(' ', normalize-space(@class), ' '), ' %s ')]" % (
                 prefix, match.group(1) or '*', match.group(2))
-        options = dict(regex_prefix=regex_prefix)
+        options = dict(regex_prefix=regex_prefix, match_pattern=match_pattern)
         css_expr = parse(css_expr, options)
     expr = css_expr.xpath()
     assert expr is not None, (
@@ -593,12 +605,13 @@ def css_to_xpath(css_expr, prefix='descendant-or-self::', regex_prefix=default_r
 class XPathExpr(object):
 
     def __init__(self, prefix=None, path=None, element='*', condition=None,
-                 star_prefix=False):
+                 star_prefix=False, options=None):
         self.prefix = prefix
         self.path = path
         self.element = element
         self.condition = condition
         self.star_prefix = star_prefix
+        self.options = options or {}
 
     def __str__(self):
         path = ''
@@ -609,6 +622,8 @@ class XPathExpr(object):
         path += _unicode(self.element)
         if self.condition:
             path += '[%s]' % self.condition
+        if self.options.get('match_pattern') and not is_match_pattern(path):
+            path = '//%s[sets:has-same-node(%s, .)]' % (self.element, path)
         return path
 
     def __repr__(self):
@@ -671,15 +686,20 @@ class XPathExprOr(XPathExpr):
     the union, it's the sum, so duplicate elements will appear.
     """
 
-    def __init__(self, items, prefix=None):
+    def __init__(self, items, prefix=None, options=None):
         for item in items:
             assert item is not None
         self.items = items
-        self.prefix = prefix
+        self.options = options or {}
+        if prefix:
+            self.add_prefix(prefix)
 
     def __str__(self):
-        prefix = self.prefix or ''
-        return ' | '.join(["%s%s" % (prefix,i) for i in self.items])
+        return ' | '.join(["%s" % i for i in self.items])
+
+    def add_prefix(self, prefix):
+        for item in self.items:
+            item.add_prefix(prefix)
 
 split_at_single_quotes = re.compile("('+)").split
 
@@ -699,6 +719,21 @@ def xpath_literal(s):
             for part in split_at_single_quotes(s) if part
             ])
     return s
+
+def is_match_pattern(xpath):
+    template = '''
+        <xsl:stylesheet version="1.0"
+            xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+            xmlns:exslt_org_regular_expressions="http://exslt.org/regular-expressions"
+            >
+            <xsl:template match=%s />
+        </xsl:stylesheet>
+        '''
+    try:
+        etree.XSLT(etree.XML(template % quoteattr(xpath)))
+    except Exception:
+        return False
+    return True
 
 ##############################
 ## Parsing functions
